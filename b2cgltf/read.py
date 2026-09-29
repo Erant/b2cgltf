@@ -114,13 +114,20 @@ def skeleton(doc: Document, skin: int = 0) -> Skeleton:
 
 
 def skin_points(V: np.ndarray, idx: np.ndarray, w: np.ndarray, mats: np.ndarray) -> np.ndarray:
-    """Linear blend skinning: V [n, 3], idx/w [n, k], mats [..., J, 4, 4] -> [..., n, 3]."""
+    """Linear blend skinning: V [n, 3], idx/w [n, k], mats [..., J, 4, 4] -> [..., n, 3]. Poses go through in
+    chunks so the gathered per-vertex matrices stay ~64 MB whatever the frame count (a 360-frame clip of a 22k-vertex
+    cage otherwise gathers 1 GB per weight slot)."""
     V = np.asarray(V, np.float64); w = np.asarray(w, np.float64)
-    out = np.zeros((*mats.shape[:-3], len(V), 3))
-    for k in range(idx.shape[1]):
-        m = mats[..., idx[:, k], :, :]
-        out += w[:, k, None] * ((m[..., :3, :3] @ V[..., None])[..., 0] + m[..., :3, 3])
-    return out
+    lead = mats.shape[:-3]
+    M = mats.reshape(-1, *mats.shape[-3:])
+    out = np.zeros((len(M), len(V), 3))
+    step = max(1, (64 << 20) // (len(V) * 12 * 8))
+    for a in range(0, len(M), step):
+        o = out[a:a + step]
+        for k in range(idx.shape[1]):
+            m = M[a:a + step, idx[:, k], :3, :]
+            o += w[:, k, None] * (np.einsum("...ij,...j->...i", m[..., :3], V) + m[..., 3])
+    return out.reshape(*lead, len(V), 3)
 
 
 def joints_weights(doc: Document, prim: dict) -> tuple[np.ndarray, np.ndarray]:
