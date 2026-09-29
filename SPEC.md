@@ -100,7 +100,7 @@ One `POINTS` primitive carries
 | `opacity` (logit) | `KHR_gaussian_splatting:OPACITY` (float) | `sigmoid` |
 | `f_dc_0..2` | `KHR_gaussian_splatting:SH_DEGREE_0_COEF_0` | none (the same 0.5 bias as 3DGS) |
 | `f_rest_0..44` (channel-major: 15 R, 15 G, 15 B) | `KHR_gaussian_splatting:SH_DEGREE_{1,2,3}_COEF_n` (VEC3) | regroup coefficient-major |
-| `seg_label` | `_SEG_LABEL` (UNSIGNED_BYTE SCALAR): Sapiens2 Goliath class ids | cast |
+| `seg_label` | `_SEG_LABEL` (UNSIGNED_BYTE SCALAR, `byteStride` 4: glTF aligns every vertex-attribute element to 4 bytes): Sapiens2 Goliath class ids | cast |
 | `seg_conf` | `_SEG_CONF` (float) | none |
 | - | `COLOR_0` | diffuse colour from SH0 (`0.5 + 0.2820948 · f_dc`, clamped), for viewers without splat support |
 
@@ -255,8 +255,9 @@ scene 1 "b2crig"                (b2crig sets the document's default scene to it)
   - `posing`: the posing rule the binding is for (e.g. `"b2ctrain cage.cu pose_bound v1"`).
 - **Per-splat state** (attributes on b2crig's primitive): `_B2CRIG_OPEN_R/G/B`, `_B2CRIG_OPEN_DOPACITY`,
   `_B2CRIG_CAGE_FILL`, `_B2CRIG_GATE_A/_B`.
-- **Optional `B2CRIG_cage_app`.** The pose-dependent appearance MLP: weights and per-cage-vertex latents as
-  accessors.
+- **Optional document extension `B2CRIG_cage_app`.** The pose-dependent appearance MLP (b2ctrain's `.app`):
+  `{version, params, latents, latentSize, ...scalars}`. `params` and `latents` are flat float accessors; `latents`
+  holds `latentSize` values per cage vertex.
 
 ## 6. Clip files
 
@@ -271,19 +272,33 @@ may refine this section; a change bumps `B2CRIG_clip`'s version.
   LINEAR.
 - **Document extension `B2CRIG_clip`:**
   - `version`;
+  - `name` (the clip's name) and `fps`;
+  - `skeleton`: `{"root": <node>, "joints": [<node>, ...]}`, the copy's root and its joint nodes in MHR joint order;
   - `subject`: `{"id": <the subject file's asset.extras.b2c_id>, "uri": <relative path hint>}`;
-  - `rig`: `{"cageSha256": <hex>, "cageVertexCount": <int>, "jointCount": <int>}`. `cageSha256` is taken over the
-    cage's POSITION and index accessor bytes, in primitive order.
+  - `rig`: `{"cageSha256": <hex>, "cageVertexCount": <int>, "jointCount": <int>}`. `cageSha256` is a sha256 over:
+    1. for each primitive of `b2crig_cage` in order: its `POSITION` bytes, its index bytes, then its
+       `JOINTS_n` and `WEIGHTS_n` bytes (n ascending, JOINTS before WEIGHTS);
+    2. then the skin's inverse bind matrices, every joint's rest rotation and every joint's rest translation, as
+       float32 little-endian.
+
+    A residual is only valid against exactly this cage, weighting and skeleton.
+- **Animation.** Named `b2crig_<clip name>`. The time of frame i is i / fps.
 - **Animation extension `B2CRIG_cage_residual`:** `{version, accessor, scale, frames, vertices}`. Per frame and
-  cage vertex, b2crig's posed cage minus plain skinning, as normalised int16 × `scale`. This one term holds pose
-  correctives, expressions, hair dynamics and fit corrections. Plain skinning alone is off by centimetres (p99
-  27 mm on b24be4).
-- **Animation extension `B2CRIG_open_gate`** (optional): the per-frame, per-cage-vertex gate angle, as normalised
-  uint16 over 0–180°.
-- **Animation extension `B2CRIG_motion`** (optional): the clip's MHR inputs (`body_params` [T,130], `expr` [T,72],
-  root motion), so a reader that has MHR can re-pose exactly.
-- **Checks.** A player refuses a clip whose `subject.id` differs from the subject file's `b2c_id`, or whose `rig`
-  does not match the subject file's current cage.
+  cage vertex, b2crig's posed cage minus plain skinning, in the b2crunner frame. It is one normalised SHORT VEC3
+  accessor with `frames × vertices` elements, frame-major, × `scale` metres. This one term holds pose correctives,
+  expressions, hair dynamics and fit corrections. Plain skinning alone is off by centimetres (p99 27 mm on b24be4).
+- **Animation extension `B2CRIG_open_gate`** (optional): `{version, accessor, frames, vertices, rangeDeg: 180}`.
+  The per-frame, per-cage-vertex gate angle, as normalised UNSIGNED_SHORT × `rangeDeg`.
+- **Animation extension `B2CRIG_motion`** (optional): the clip's MHR inputs, e.g. `body_params` [T,130],
+  `expr` [T,72], `root_R` [T,3,3], `root_t` [T,3], `root_c` [3], `global_trans` [T,3]. Each is stored as
+  `{"accessor": <float SCALAR, flat>, "shape": [...]}`, so a reader that has MHR can re-pose exactly.
+- **Checks.** A player refuses a clip if:
+  - its `subject.id` differs from the subject file's `b2c_id`;
+  - its `rig` does not match the subject file's current cage;
+  - its skeleton copy (parents, rest TRS) differs from the subject's.
+
+These refinements (b2cgltf's first implementation, 2026-09-29) were made before any clip file was written, so
+`B2CRIG_clip` stays at version 1.
 
 ## 7. Reading
 

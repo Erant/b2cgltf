@@ -1,0 +1,16 @@
+[project]
+name = "b2cgltf"
+version = "1.0.0"
+description = "Reader and writer of the b2c glTF subject and clip files (SPEC.md), shared by b2crunner and b2crig"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["b2cgltf*"]
