@@ -1,7 +1,6 @@
 """b2crunner's inputs -> the arrays SPEC 4.2/4.3 stores, as numpy only (no glTF here; subject.py writes them).
 
-- the trainer PLY (3DGS layout) -> `KHR_gaussian_splatting` attributes + `_SEG_*` (SPEC 4.2), with the writer's
-  refusals and drops;
+- the trainer PLY -> its per-vertex properties and header comments (the encoding is the core's `splat.attributes`);
 - MHR's sparse skin weights -> `JOINTS_n`/`WEIGHTS_n` sets (SPEC 4.3);
 - the fitted joints (world positions + rotations) -> joint-node TRS and inverse bind matrices (SPEC 4.3);
 - the body record's version-1 rotations -> version 2 (SPEC 4.6).
@@ -11,11 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-
-SH_C0 = 0.28209479177387814
-
-#: per-vertex properties the writer drops (SPEC 4.2): debug evidence, and b2crig-owned open/cage state
-DROPPED_PREFIXES = ("ev_", "open_", "cage_fill", "cage_gate_")
 
 _PLY_TYPES = {"char": "i1", "int8": "i1", "uchar": "u1", "uint8": "u1", "short": "i2", "int16": "i2",
               "ushort": "u2", "uint16": "u2", "int": "i4", "int32": "i4", "uint": "u4", "uint32": "u4",
@@ -54,73 +48,6 @@ def read_trainer_ply(path: str | Path) -> tuple[dict[str, np.ndarray], list[str]
     if len(data) != count:
         raise ValueError(f"{path}: {len(data)} of {count} vertices")
     return {name: np.ascontiguousarray(data[name]) for name, _ in fields}, comments
-
-
-def splat_attributes(props: dict[str, np.ndarray]) -> tuple[dict[str, np.ndarray], list[str]]:
-    """SPEC 4.2: {glTF attribute: array} and the dropped property names.
-
-    Refuses: an unknown property, a float32 opacity of exactly 0 or 1, a `seg_label` that is not an integer in
-    0-255, a zero quaternion, a partial SH degree."""
-    names = set(props)
-    dropped = sorted(n for n in names if n.startswith(DROPPED_PREFIXES))
-    base = {"x", "y", "z", "rot_0", "rot_1", "rot_2", "rot_3", "scale_0", "scale_1", "scale_2", "opacity",
-            "f_dc_0", "f_dc_1", "f_dc_2"}
-    missing = base - names
-    if missing:
-        raise ValueError(f"splat PLY lacks {sorted(missing)}")
-    n_rest = sum(1 for n in names if n.startswith("f_rest_"))
-    degree = {0: 0, 9: 1, 24: 2, 45: 3}.get(n_rest)
-    if degree is None or any(f"f_rest_{i}" not in names for i in range(n_rest)):
-        raise ValueError(f"splat PLY has {n_rest} f_rest_* properties; not a whole SH degree")
-    known = base | {f"f_rest_{i}" for i in range(n_rest)} | {"seg_label", "seg_conf"} | set(dropped)
-    known |= {"nx", "ny", "nz"} & names   # exporters' zero normals: not data
-    unknown = names - known
-    if unknown:
-        raise ValueError(f"splat PLY has properties SPEC 4.2 does not place: {sorted(unknown)}")
-    dropped += sorted({"nx", "ny", "nz"} & names)
-
-    f32 = lambda *keys: np.stack([props[k].astype(np.float32) for k in keys], axis=1)
-    out: dict[str, np.ndarray] = {}
-    out["POSITION"] = f32("x", "y", "z")
-
-    wxyz = f32("rot_0", "rot_1", "rot_2", "rot_3").astype(np.float64)
-    norm = np.linalg.norm(wxyz, axis=1, keepdims=True)
-    if not np.all(norm > 0):
-        raise ValueError(f"{int(np.sum(norm == 0))} splat(s) with a zero quaternion")
-    out["KHR_gaussian_splatting:ROTATION"] = (wxyz / norm)[:, [1, 2, 3, 0]].astype(np.float32)
-
-    out["KHR_gaussian_splatting:SCALE"] = np.exp(f32("scale_0", "scale_1", "scale_2").astype(np.float64)
-                                                 ).astype(np.float32)
-
-    opacity = (1.0 / (1.0 + np.exp(-props["opacity"].astype(np.float64)))).astype(np.float32)
-    bad = (opacity == 0.0) | (opacity == 1.0)
-    if bad.any():
-        raise ValueError(f"{int(bad.sum())} splat(s) with opacity exactly 0 or 1 in float32 (logit range "
-                         f"{props['opacity'].min():.3g}..{props['opacity'].max():.3g}); refusing, not clamping")
-    out["KHR_gaussian_splatting:OPACITY"] = opacity
-
-    dc = f32("f_dc_0", "f_dc_1", "f_dc_2")
-    out["KHR_gaussian_splatting:SH_DEGREE_0_COEF_0"] = dc
-    if n_rest:
-        per_channel = n_rest // 3   # channel-major: coefficients of R, then G, then B
-        rest = np.stack([props[f"f_rest_{i}"].astype(np.float32) for i in range(n_rest)], axis=1)
-        rest = rest.reshape(-1, 3, per_channel)   # [N, channel, coefficient]
-        k = 0
-        for l in range(1, degree + 1):
-            for m in range(2 * l + 1):
-                out[f"KHR_gaussian_splatting:SH_DEGREE_{l}_COEF_{m}"] = np.ascontiguousarray(rest[:, :, k])
-                k += 1
-
-    out["COLOR_0"] = np.clip(0.5 + SH_C0 * dc, 0.0, 1.0).astype(np.float32)
-
-    if "seg_label" in names:
-        label = props["seg_label"]
-        if not (np.all(label == np.round(label)) and label.min() >= 0 and label.max() <= 255):
-            raise ValueError("seg_label is not an integer class id in 0-255")
-        out["_SEG_LABEL"] = label.astype(np.uint8)
-    if "seg_conf" in names:
-        out["_SEG_CONF"] = props["seg_conf"].astype(np.float32)
-    return out, dropped
 
 
 def skin_sets(skin_vertex: np.ndarray, skin_joint: np.ndarray, skin_weight: np.ndarray, n_verts: int,

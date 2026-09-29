@@ -37,50 +37,6 @@ def test_ply_round_trip(tmp_path):
     assert all(np.array_equal(back[k], props[k]) for k in names)
 
 
-def test_splat_attributes_layout():
-    props = splat_props()
-    out, dropped = C.splat_attributes(props)
-    assert dropped == []
-    # channel-major f_rest: channel c, coefficient k at f_rest_{c*15+k}; degree 2 coef 1 is coefficient k = 3 + 1
-    for c in range(3):
-        assert np.array_equal(out["KHR_gaussian_splatting:SH_DEGREE_2_COEF_1"][:, c], props[f"f_rest_{c * 15 + 4}"])
-        assert np.array_equal(out["KHR_gaussian_splatting:SH_DEGREE_3_COEF_6"][:, c], props[f"f_rest_{c * 15 + 14}"])
-    q = out["KHR_gaussian_splatting:ROTATION"]
-    wxyz = np.stack([props[f"rot_{i}"] for i in range(4)], 1).astype(np.float64)
-    assert np.allclose(q, (wxyz / np.linalg.norm(wxyz, axis=1, keepdims=True))[:, [1, 2, 3, 0]], atol=1e-7)
-    assert np.allclose(np.log(out["KHR_gaussian_splatting:SCALE"][:, 0]), props["scale_0"], atol=1e-6)
-    logit = np.log(out["KHR_gaussian_splatting:OPACITY"] / (1 - out["KHR_gaussian_splatting:OPACITY"]))
-    assert np.allclose(logit, props["opacity"], atol=1e-5)
-    assert out["_SEG_LABEL"].dtype == np.uint8
-    assert np.array_equal(out["_SEG_LABEL"], props["seg_label"].astype(np.uint8))
-    assert "SH_DEGREE_0_COEF_0" in " ".join(out) and "COLOR_0" in out
-
-
-def test_splat_attributes_drops_and_refusals():
-    props = splat_props(degree=0)
-    props["ev_err"] = props["open_r"] = props["cage_fill"] = np.zeros(5, np.float32)
-    out, dropped = C.splat_attributes(props)
-    assert dropped == ["cage_fill", "ev_err", "open_r"]
-    assert not any(k.startswith("KHR_gaussian_splatting:SH_DEGREE_1") for k in out)
-
-    unknown = dict(props, mystery=np.zeros(5, np.float32))
-    with pytest.raises(ValueError, match="mystery"):
-        C.splat_attributes(unknown)
-
-    saturated = dict(props, opacity=np.full(5, 20.0, np.float32))
-    with pytest.raises(ValueError, match="exactly 0 or 1"):
-        C.splat_attributes(saturated)
-
-    fractional = dict(props, seg_label=np.full(5, 1.5, np.float32))
-    with pytest.raises(ValueError, match="seg_label"):
-        C.splat_attributes(fractional)
-
-    partial = splat_props(degree=1)
-    del partial["f_rest_8"]
-    with pytest.raises(ValueError, match="SH degree"):
-        C.splat_attributes(partial)
-
-
 def test_skin_sets_sorted_padded_untruncated():
     # vertex 0: 2 influences, vertex 1: 5 influences (-> two sets), vertex 2: 1
     v = np.array([0, 0, 1, 1, 1, 1, 1, 2])
