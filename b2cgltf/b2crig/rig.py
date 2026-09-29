@@ -124,7 +124,10 @@ def enhance(doc: Document, w: Writer, layers: list[Layer], binding: Binding, *, 
         supersedes = doc.node_index("b2c_splat")
     else:
         d = read.splat(doc, doc.node_index("b2c_splat"))
-        sat = S.splat_attribute_keys(d["primitive"]["attributes"])   # R1a: b2crunner's accessors, referenced
+        at = d["primitive"]["attributes"]
+        sat = S.splat_attribute_keys(at)   # R1a: b2crunner's accessors, referenced
+        if "_SEG_LABEL" in at:   # the labels the binding was made with, under b2crig's names (R1)
+            sat["_B2CRIG_SEG_LABEL"], sat["_B2CRIG_SEG_CONF"] = at["_SEG_LABEL"], at["_SEG_CONF"]
         supersedes = None
     cnt = doc.json["accessors"][sat["POSITION"]]["count"]
     if cnt != n:

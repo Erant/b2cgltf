@@ -161,7 +161,7 @@ def current_splat(doc: Document) -> int:
 
 def splat(doc: Document, node: int | None = None) -> dict:
     """The splat's arrays in display form: pos, rot (x y z w), scale (linear), opacity (0..1), sh [n, K, 3]
-    (coefficient-major: DC first), seg_label / seg_conf when present."""
+    (coefficient-major: DC first), seg_label / seg_conf when present (b2ctrain binds by them)."""
     js = doc.json
     node = current_splat(doc) if node is None else node
     prim = js["meshes"][js["nodes"][node]["mesh"]]["primitives"][0]
@@ -174,8 +174,9 @@ def splat(doc: Document, node: int | None = None) -> dict:
         coefs += [g(f"{KHR}:SH_DEGREE_{d}_COEF_{c}") for c in range(SH_PER_DEGREE[d])]
     out = {"node": node, "primitive": prim, "pos": g("POSITION"), "rot": g(f"{KHR}:ROTATION"), "scale": g(f"{KHR}:SCALE"),
            "opacity": g(f"{KHR}:OPACITY"), "sh": np.stack(coefs, 1)}
-    if "_SEG_LABEL" in at:
-        out["seg_label"] = g("_SEG_LABEL"); out["seg_conf"] = g("_SEG_CONF")
+    for p in ("_SEG", "_B2CRIG_SEG"):   # b2crunner's splat, or b2crig's rigged splat (SPEC 5.3)
+        if f"{p}_LABEL" in at:
+            out["seg_label"] = g(f"{p}_LABEL"); out["seg_conf"] = g(f"{p}_CONF")
     return out
 
 

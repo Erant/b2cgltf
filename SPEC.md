@@ -255,6 +255,9 @@ scene 1 "b2crig"                (b2crig sets the document's default scene to it)
   - `posing`: the posing rule the binding is for (e.g. `"b2ctrain cage.cu pose_bound v1"`).
 - **Per-splat state** (attributes on b2crig's primitive): `_B2CRIG_OPEN_R/G/B`, `_B2CRIG_OPEN_DOPACITY`,
   `_B2CRIG_CAGE_FILL`, `_B2CRIG_GATE_A/_B`.
+- **`_B2CRIG_SEG_LABEL` / `_B2CRIG_SEG_CONF`**: the labels the binding was made with, so a consumer that binds again
+  (b2ctrain) gets the same binding. They are b2crunner's `_SEG_*` accessors, referenced (R1a), or a retrained
+  splat's own.
 - **Optional document extension `B2CRIG_cage_app`.** The pose-dependent appearance MLP (b2ctrain's `.app`):
   `{version, params, latents, latentSize, ...scalars}`. `params` and `latents` are flat float accessors; `latents`
   holds `latentSize` values per cage vertex.

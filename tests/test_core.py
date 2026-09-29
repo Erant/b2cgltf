@@ -307,3 +307,13 @@ def test_validator(subject, tmp_path):
     C.write(tmp_path / "c.clip.glb", doc, "rest", 30.0, np.tile(sk.rest_q, (2, 1, 1)), np.tile(sk.rest_t, (2, 1, 1)),
             residual=np.zeros((2, len(R.cage(doc).verts), 3)))
     validate(tmp_path / "c.clip.glb")
+
+
+def test_rigged_splat_keeps_the_binding_labels(subject):
+    """b2ctrain binds by seg_label: the rigged splat must read back with the labels its binding was made with."""
+    path, info = subject
+    doc = rig_subject(path, info)
+    rigged, plain = read.splat(doc), read.splat(doc, doc.node_index("b2c_splat"))
+    assert rigged["node"] == doc.extension(R.RIG)["splatNode"]
+    np.testing.assert_array_equal(rigged["seg_label"], plain["seg_label"])
+    np.testing.assert_array_equal(rigged["seg_conf"], plain["seg_conf"])
