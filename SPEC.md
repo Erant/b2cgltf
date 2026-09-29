@@ -31,8 +31,9 @@ training dataset (`colmap/`) and regenerable caches (`seen.npy`) are not in any 
 - **Frame rule.** Every array defined here is in the **b2crunner frame**: the local frame of the root nodes
   `b2c_world` / `b2c_skeleton`, never glTF world. That covers the splat, body, cameras, cage, binding offsets,
   residuals, and the posed splat b2ctrain produces. Both roots carry the same matrix `W` (b2crunner frame → glTF:
-  +Y up, subject facing +Z, metres, right-handed). `W` is written explicitly even when it is the identity, as it is
-  expected to be.
+  +Y up, subject facing +Z, metres, right-handed). `W` is written explicitly even when it is the identity, which it
+  is for b2crunner's output: b24be4's subject file renders upright and facing the camera in a third-party viewer with
+  `W` = identity (checked 2026-09-29).
 - **Units:** metres. **Precision:** float32 accessors throughout, with no float64 data. Rotation matrices are
   MAT3 accessors (column-major, as glTF defines them).
 - **Cameras:** camera-to-world, OpenGL axes (the rotation's columns are the camera's right, up and back; it looks
