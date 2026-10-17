@@ -356,8 +356,41 @@ The sha256 must match. Readers that only need the bind-pose mesh, skeleton and w
 | clip file: joint channels | ~1 MB per 360 frames |
 | clip file: residual (22.5k cage vertices) | ~49 MB per 360 frames |
 
-Compression (`EXT_meshopt_compression`, or an SPZ extension of `KHR_gaussian_splatting`) can come later without
-changing this layout.
+For publishing, section 10's web forms bring b24be4 down to ~7 MB for the subject and ~3 MB per 100 clip frames.
+
+## 10. Web forms
+
+Smaller, lossy files derived from a rigged subject and its clips, for publishing. b2cviewer plays them; the glTF
+files stay the source. `b2cgltf/web.py` writes them (`python -m b2cgltf.web subject|clip SRC DST`). Both are ZIP
+archives (entries stored or deflated, no ZIP64).
+
+### 10.1 The web subject: `<name>.sog`
+
+A PlayCanvas SOG v2 archive of the current splat (7.1), as splat-transform writes it, in the b2crunner frame, plus:
+
+- **`meta.json` key `b2c`**: `{version: 1, rig: "rig.glb", binding: {posing, face: {file}, offset: {mins, maxs,
+  files: [low, high]}}}`. SOG readers ignore keys and files they do not know, so a SOG viewer shows the rest-pose
+  splat.
+- **The binding** (5.3), per splat in the SOG's splat order, as lossless WebP textures in the SOG's layout:
+  - `bind_face.webp`: R, G = the face index as uint16 (`0xFFFF` = unbound), B, A = barycentric b1, b2 × 255;
+  - `bind_off_l.webp`, `bind_off_u.webp`: the offset's low and high bytes, 16 bits per axis, linear between
+    `mins` and `maxs`.
+
+  The dual binding is not carried.
+- **`rig.glb`**: the subject file stripped to its skeleton (with `W`), the skin and the cage, with `B2CRIG_rig`
+  (`splatNode` null) and the subject's `asset`. Cage and skeleton bytes are copied unchanged, so the rig hash (6)
+  is the subject's.
+
+On b24be4 the quantisation moves rest-pose splats by under 0.2 mm.
+
+### 10.2 The web clip: `<name>.clip.zip`
+
+- **`clip.glb`**: the clip file (6) without `B2CRIG_motion` and `B2CRIG_open_gate`. Its `B2CRIG_cage_residual` is
+  `{version, file: "residual.bin", frames, vertices, step}` in place of `accessor` and `scale`.
+- **`residual.bin`**: the residual in units of `step` metres (default 0.05 mm), as int16 differences from the
+  previous frame (frame 0 is absolute), with all low bytes first, then all high bytes. It is deflated.
+
+The subject checks of section 6 apply unchanged.
 
 ## References
 

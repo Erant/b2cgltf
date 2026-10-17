@@ -5,6 +5,7 @@ between b2crunner and b2crig.
 
 ```
 pip install -e .            # numpy only
+pip install -e '.[web]'     # web.py's subject form: Pillow, SciPy, and splat-transform (SPLAT_TRANSFORM or PATH)
 pytest tests                # set B2C_GLTF_VALIDATOR=/path/to/gltf_validator to include the Khronos validator
 ```
 
@@ -16,6 +17,9 @@ pytest tests                # set B2C_GLTF_VALIDATOR=/path/to/gltf_validator to 
 | `b2cgltf/validate.py` | shared | the Khronos glTF-Validator check of SPEC 8, with the pinned allow-list |
 | `b2cgltf/b2crunner/` | b2crunner | the subject writer (section 4) and its input conversions |
 | `b2cgltf/b2crig/` | b2crig | the rig enhancement (`rig.py`, section 5) and clip files (`clip.py`, section 6) |
+| `b2cgltf/web.py` | shared | the web forms (section 10): `python -m b2cgltf.web subject scene.glb scene.sog`, `… clip x.clip.glb x.clip.zip` |
+| `b2cgltf/convert.py` | shared | the current splat as a plain file: `python -m b2cgltf.convert scene.glb out.ply` (bare trainer vertex properties) or `--format sog` (via splat-transform) |
+| `tools/convert.py` | shared | a runnable front for `b2cgltf.convert`: `tools/convert.py scene.glb out.ply` |
 
 The JSON stays a plain dict, so load → save reproduces a file exactly (SPEC 8, preservation). pygltflib was tried
 and rejected because it writes default fields (`"normalized": false`, sampler wraps) into every object.

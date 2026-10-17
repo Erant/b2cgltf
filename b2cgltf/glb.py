@@ -33,21 +33,29 @@ def read(path: str | Path) -> tuple[dict, bytearray]:
     return js, bin_
 
 
-def write(path: str | Path, js: dict, bin_: bytes | bytearray) -> None:
-    """Atomically (temporary file in the same directory, then rename)."""
+def dumps(js: dict, bin_: bytes | bytearray) -> bytes:
+    """The .glb bytes of a JSON dict and buffer 0."""
     jb = json.dumps(js, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     jb += b" " * (-len(jb) % 4)
     bb = bytes(bin_) + b"\0" * (-len(bin_) % 4)
     total = 12 + 8 + len(jb) + (8 + len(bb) if bb else 0)
+    out = struct.pack("<III", MAGIC, VERSION, total) + struct.pack("<II", len(jb), JSON_CHUNK) + jb
+    return out + (struct.pack("<II", len(bb), BIN_CHUNK) + bb if bb else b"")
+
+
+def write(path: str | Path, js: dict, bin_: bytes | bytearray) -> None:
+    """Atomically (temporary file in the same directory, then rename)."""
+    write_bytes(path, dumps(js, bin_))
+
+
+def write_bytes(path: str | Path, data: bytes) -> None:
+    """Atomically (temporary file in the same directory, then rename)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(struct.pack("<III", MAGIC, VERSION, total))
-            f.write(struct.pack("<II", len(jb), JSON_CHUNK)); f.write(jb)
-            if bb:
-                f.write(struct.pack("<II", len(bb), BIN_CHUNK)); f.write(bb)
+            f.write(data)
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
