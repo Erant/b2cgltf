@@ -101,3 +101,16 @@ def test_write_subject_validates(tmp_path):
     capture.images = {}   # the stand-in PNG bytes are not an image
     path = subject.write_subject(tmp_path / "s.glb", splat_fields(), body, capture, W=W_TEST, log=lambda *_: None)
     validate(path)
+
+
+def test_write_subject_with_levels(tmp_path):
+    body, capture = inputs()
+    full, lv = splat_fields(40), [splat_fields(20, np.random.default_rng(2)), splat_fields(10, np.random.default_rng(3))]
+    path = subject.write_subject(tmp_path / "s.glb", full, body, capture, levels=[(lv[0], "m"), (lv[1], "m")],
+                                 log=lambda *_: None)
+    doc = document.load(path)
+    chain = read.lods(doc)
+    assert [(c, h) for _, c, h in chain] == [(40, None), (20, 960.0), (10, 480.0)]
+    assert [doc.json["nodes"][n]["name"] for n, *_ in chain[1:]] == ["b2c_splat_lod1", "b2c_splat_lod2"]
+    from b2cgltf import lod
+    assert lod.check(doc) == []

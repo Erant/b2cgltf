@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from .. import lod as lod_enc
 from .. import splat as splat_enc
 from ..document import ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER, UNSIGNED_INT, Document, RuleError
 from . import convert
@@ -113,8 +114,11 @@ def _world_matrix(W: np.ndarray) -> list:
 
 def write_subject(path: str | Path, splat_fields, body: Body, capture: Capture, *, W: np.ndarray = np.eye(4),
                   tool: str = "b2crunner", version: str = "", commit: str = "", view_cameras: bool = True,
-                  log=print) -> Path:
-    """Create the subject file at `path` (atomically). Refuses inputs the spec does not allow."""
+                  levels=(), log=print) -> Path:
+    """Create the subject file at `path` (atomically). Refuses inputs the spec does not allow.
+
+    `levels`: the splat's LOD levels (4.7), most splats first, each (trainer-PLY fields, method text), written as
+    b2c_splat_lod1..n in no scene and chained behind b2c_splat with the default screen heights."""
     doc, w = Document.new("b2crunner", tool=tool, version=version, commit=commit)
     matrix = _world_matrix(W)
 
@@ -207,4 +211,10 @@ def write_subject(path: str | Path, splat_fields, body: Body, capture: Capture, 
 
     scene = w.add_scene({"name": "b2c", "nodes": [world, skeleton, body_node]})
     w.set_default_scene(scene)
+
+    # 4.7 the splat's levels
+    if levels:
+        nodes = [lod_enc.add_level_splat(w, f, f"b2c_splat_lod{i + 1}") for i, (f, _) in enumerate(levels)]
+        lod_enc.add_lods(w, splat_node, [{"node": n, "method": m} for n, (_, m) in zip(nodes, levels)])
+        log(f"b2cgltf.b2crunner: {len(nodes)} LOD levels, " + " / ".join(str(len(f["x"])) for f, _ in levels))
     return w.save(path)
