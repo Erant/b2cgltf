@@ -174,3 +174,13 @@ def test_subject_lods_unrigged(tmp_path):
     assert not res["rigged"] and "rig" not in lm["b2c"] and not (out / "rig.glb").exists()
     assert lm["counts"] == [60, 40, 20]
     assert "b2c" not in json.loads((out / "1_0" / "meta.json").read_text())
+
+
+def test_one_file_per_level_in_any_file_order():
+    """splat-transform may list the level files out of order (crew-china: 0_0, 2_0, 1_0); a range's file indexes the list"""
+    lm = {"filenames": ["0_0/meta.json", "2_0/meta.json", "1_0/meta.json"],
+          "tree": {"lods": {"0": {"file": 0, "offset": 0, "count": 30}, "1": {"file": 2, "offset": 0, "count": 20},
+                            "2": {"file": 1, "offset": 0, "count": 10}}}}
+    assert web._one_file_per_level(lm, [30, 20, 10])
+    lm["tree"]["lods"]["1"]["file"] = 1   # level 1's range in level 2's file
+    assert not web._one_file_per_level(lm, [30, 20, 10])

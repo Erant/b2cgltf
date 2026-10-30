@@ -253,8 +253,10 @@ def subject(src: str | Path, dst: str | Path, *, level: int = 0, exe: str | None
 
 def _one_file_per_level(lm: dict, counts: list[int]) -> bool:
     """lod-meta.json keeps level i whole in file `i_0/`: the tree's nodes (spatial cells, splat-transform splits once
-    the levels together pass chunkGaussians) only index ranges of it, which tile it exactly."""
-    if lm.get("filenames") != [f"{i}_0/meta.json" for i in range(len(counts))]:
+    the levels together pass chunkGaussians) only index ranges of it, which tile it exactly. splat-transform may list
+    the files in any order (`filenames`; e.g. 0_0, 2_0, 1_0): a range's `file` indexes that list."""
+    names = lm.get("filenames") or []
+    if sorted(names) != sorted(f"{i}_0/meta.json" for i in range(len(counts))):
         return False
     spans = {i: [] for i in range(len(counts))}
     stack = [lm.get("tree", {})]
@@ -262,7 +264,7 @@ def _one_file_per_level(lm: dict, counts: list[int]) -> bool:
         nd = stack.pop()
         stack += nd.get("children", [])
         for k, r in nd.get("lods", {}).items():
-            if int(k) not in spans or r["file"] != int(k):
+            if int(k) not in spans or not 0 <= r["file"] < len(names) or names[r["file"]] != f"{k}_0/meta.json":
                 return False
             spans[int(k)].append((r["offset"], r["count"]))
     for i, c in enumerate(counts):
