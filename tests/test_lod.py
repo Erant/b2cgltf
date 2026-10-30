@@ -164,3 +164,36 @@ def test_validator_with_levels(subject):
     path, info = subject
     chain_b2crunner(path, info, coverage=True)
     validate(path)
+
+
+def test_strip_lods(subject, tmp_path):
+    """b2crunner's chain reused by b2crig's (R1a): stripping drops both chains, their nodes and bytes; the current
+    splat, its binding and the rig stay exactly as they were, and so does the b2c_id (the clips still fit); b2c_stripped
+    and a history entry record the strip (R8)."""
+    path, info = subject
+    chain_b2crunner(path, info)
+    doc = rig_subject(path, info)
+    w = doc.writer("b2crig", tool="test")
+    b_nodes = [doc.node_index("b2c_splat_lod1"), doc.node_index("b2c_splat_lod2")]
+    nodes = [R.add_level(doc, w, R.Binding(info["fi"][:c], info["b"][:c, 1:], np.zeros((c, 3))),
+                         name=f"b2crig_splat_lod{i + 1}", reuse_node=bn) for i, (bn, c) in enumerate(zip(b_nodes, (40, 20)))]
+    lod.add_lods(w, doc.extension(R.RIG)["splatNode"], [{"node": n} for n in nodes])
+    w.save(path)
+    doc = Document.load(path)
+    res = lod.strip_lods(path, tmp_path / "stripped.glb")
+    out = Document.load(tmp_path / "stripped.glb")
+    assert sorted(res["levels"]) == ["b2c_splat_lod1", "b2c_splat_lod2", "b2crig_splat_lod1", "b2crig_splat_lod2"]
+    assert res["bytes_after"] < res["bytes_before"]
+    assert [c for _, c, _ in read.lods(out)] == [60] and lod.check(out) == []
+    assert not any(n.get("name", "").startswith(("b2c_splat_lod", "b2crig_splat_lod")) for n in out.json["nodes"])
+    assert not {"MSFT_lod", "B2C_lod", "B2CRIG_lod"} & set(out.json["extensionsUsed"])
+    for k in ("pos", "rot", "scale", "opacity", "sh", "seg_label"):
+        assert np.array_equal(read.splat(doc)[k], read.splat(out)[k])
+    assert np.array_equal(R.binding(doc).face, R.binding(out).face) and R.rig_hash(doc) == R.rig_hash(out)
+    sk0, sk1 = read.skeleton(doc), read.skeleton(out)
+    assert sk0.names == sk1.names and np.array_equal(sk0.rest_q, sk1.rest_q)
+    ex = out.json["asset"]["extras"]
+    assert ex["b2c_id"] == doc.id and ex["b2c_stripped"][-1]["nodes"] == res["levels"] and out.stripped
+    assert ex["b2c_history"][-1]["removed"] == res["levels"]
+    with pytest.raises(ValueError, match="no LOD chain"):
+        lod.strip_lods(tmp_path / "stripped.glb", tmp_path / "again.glb")

@@ -431,8 +431,8 @@ For publishing, section 10's web forms bring b24be4 down to ~7 MB for the subjec
 ## 10. Web forms
 
 Smaller, lossy files derived from a rigged subject and its clips, for publishing. b2cviewer plays them; the glTF
-files stay the source. `b2cgltf/web.py` writes them (`python -m b2cgltf.web subject|clip SRC DST`). Both are ZIP
-archives (entries stored or deflated, no ZIP64).
+files stay the source. `b2cgltf/web.py` writes them (`python -m b2cgltf.web subject|subject-lods|clip SRC DST`). The
+subject and clip are ZIP archives (entries stored or deflated, no ZIP64); the streamed subject is a folder.
 
 ### 10.1 The web subject: `<name>.sog`
 
@@ -453,6 +453,9 @@ A PlayCanvas SOG v2 archive of the current splat (7.1), as splat-transform write
 
 On b24be4 the quantisation moves rest-pose splats by under 0.2 mm.
 
+**One LOD level** (4.7): `web.subject(..., level=i)` writes member i of the current splat's chain (7.1, 0 = the
+splat itself) with its own binding; `b2c` then also has `level: {index, maxScreenHeightPx}`.
+
 ### 10.2 The web clip: `<name>.clip.zip`
 
 - **`clip.glb`**: the clip file (6) without `B2CRIG_motion` and `B2CRIG_open_gate`. Its `B2CRIG_cage_residual` is
@@ -461,6 +464,28 @@ On b24be4 the quantisation moves rest-pose splats by under 0.2 mm.
   previous frame (frame 0 is absolute), with all low bytes first, then all high bytes. It is deflated.
 
 The subject checks of section 6 apply unchanged.
+
+### 10.3 The streamed web subject: `<name>.lods/`
+
+The current splat's LOD chain (7.1) as a PlayCanvas streamed SOG, as splat-transform writes it from one `-l i`
+tagged input per member (seg_* columns dropped, so every level has the same columns):
+
+- **`lod-meta.json`**, splat-transform's, plus key `b2c`: `{version: 1, rig: "rig.glb" (rigged only), levels:
+  [{count, maxScreenHeightPx}]}`, member i = level i, the base's height null. A player picks the level by
+  `maxScreenHeightPx` (4.7); lod-meta.json has no screen heights of its own.
+- **`<i>_0/`**, one SOG folder per level, holding all of that level: the tree's nodes only index ranges of it. A
+  rigged subject's folder also holds the level's binding textures in that folder's splat order and the `b2c` block
+  of 10.1 in its `meta.json`, with `rig: "../rig.glb"` and `level: {index, maxScreenHeightPx}`.
+- **`rig.glb`** (rigged only): one for every level, as in 10.1.
+
+An unrigged subject gets the same folder without binding or rig. A level split over several files (over
+splat-transform's chunkGaussians, 524,288) is refused.
+
+**Without levels:** `lod.strip_lods(scene.glb, out.glb)` removes every chain: the level nodes, their meshes and
+bytes, `MSFT_lod`, the level records and `MSFT_screencoverage`. The current splat does not change, so this is a strip
+(R8), not a supersede. The splat, its binding and the rig hash are unchanged, so the copy keeps the `b2c_id` and its
+clips still fit (6); a history entry (`removed`) and `b2c_stripped` record the strip. Accessor indices do not move: a
+removed accessor stays as an empty placeholder.
 
 ## References
 

@@ -97,3 +97,80 @@ def test_subject_binding_follows_the_sog_order(rigged, tmp_path):
     assert R.rig_hash(got["rig"]) == R.rig_hash(doc)
     meta = got["meta"]
     assert meta["version"] == 2 and meta["count"] == len(s["pos"]) and meta["b2c"]["version"] == web.WEB_VERSION
+
+
+# ------------------------------------------------------------------ LOD levels (SPEC 10.3)
+
+def _rigged_with_levels(rigged, counts=(40, 20)):
+    """The rigged fixture plus b2crig levels: the first `counts` splats, each with its own non-zero offsets."""
+    from b2cgltf import lod
+    path, doc = rigged
+    s, b = read.splat(doc), R.binding(doc)
+    f = read.to_trainer_ply_fields(s)
+    w = doc.writer("b2crig", tool="test")
+    nodes = []
+    for i, c in enumerate(counts):
+        bind = R.Binding(b.face[:c], b.barycentric[:c], b.offset[:c] * (i + 2))
+        nodes.append(R.add_level(doc, w, bind, name=f"b2crig_splat_lod{i + 1}", splat_fields={k: v[:c] for k, v in f.items()}))
+    lod.add_lods(w, doc.extension(R.RIG)["splatNode"], [{"node": n, "method": "test"} for n in nodes])
+    w.save(path)
+    return path, Document.load(path)
+
+
+def _matches(got, doc, node):
+    s, b = read.splat(doc, node), R.binding(doc, node)
+    d = np.linalg.norm(got["pos"][:, None] - s["pos"][None].astype(np.float64), axis=2)
+    j = d.argmin(1)
+    assert d.min(1).max() < 1e-3 and len(np.unique(j)) == len(s["pos"])
+    assert np.array_equal(got["face"], b.face[j])
+    span = b.offset.max(0) - b.offset.min(0)
+    assert (np.abs(got["offset"] - b.offset[j]) <= span / 65535 + 1e-6).all()
+    assert R.rig_hash(got["rig"]) == R.rig_hash(doc)
+
+
+@pytest.mark.skipif(not _have_subject_tools(), reason="needs Pillow, SciPy and splat-transform (SPLAT_TRANSFORM)")
+def test_subject_lods_binds_every_level_in_its_order(rigged, tmp_path):
+    path, doc = _rigged_with_levels(rigged)
+    out = tmp_path / "lods"
+    info = web.subject_lods(path, out)
+    chain = read.lods(doc)
+    assert [lv["count"] for lv in info["levels"]] == [c for _, c, _ in chain]
+    import json
+    lm = json.loads((out / "lod-meta.json").read_text())
+    assert lm["filenames"] == ["0_0/meta.json", "1_0/meta.json", "2_0/meta.json"]
+    assert lm["b2c"]["rig"] == "rig.glb" and [lv["maxScreenHeightPx"] for lv in lm["b2c"]["levels"]] == [None, 960, 480]
+    for i, (node, _, h) in enumerate(chain):
+        got = web.read_subject(out / f"{i}_0")
+        _matches(got, doc, node)
+        assert got["meta"]["b2c"]["level"] == {"index": i, "maxScreenHeightPx": h}
+    web.subject_lods(path, out)   # a second run replaces the first
+    with pytest.raises(ValueError, match="not empty"):
+        (tmp_path / "other").mkdir(); (tmp_path / "other" / "x").write_text("")
+        web.subject_lods(path, tmp_path / "other")
+
+
+@pytest.mark.skipif(not _have_subject_tools(), reason="needs Pillow, SciPy and splat-transform (SPLAT_TRANSFORM)")
+def test_subject_single_level(rigged, tmp_path):
+    path, doc = _rigged_with_levels(rigged)
+    node, _, h = read.lods(doc)[2]
+    web.subject(path, tmp_path / "l2.sog", level=2)
+    got = web.read_subject(tmp_path / "l2.sog")
+    _matches(got, doc, node)
+    assert got["meta"]["b2c"]["level"] == {"index": 2, "maxScreenHeightPx": h}
+    with pytest.raises(ValueError, match="no level 3"):
+        web.subject(path, tmp_path / "l3.sog", level=3)
+
+
+@pytest.mark.skipif(not _have_subject_tools(), reason="needs Pillow, SciPy and splat-transform (SPLAT_TRANSFORM)")
+def test_subject_lods_unrigged(tmp_path):
+    from test_lod import chain_b2crunner
+    path = tmp_path / "scene.glb"
+    _, info = synthetic(path)
+    chain_b2crunner(path, info)
+    out = tmp_path / "lods"
+    res = web.subject_lods(path, out)
+    import json
+    lm = json.loads((out / "lod-meta.json").read_text())
+    assert not res["rigged"] and "rig" not in lm["b2c"] and not (out / "rig.glb").exists()
+    assert lm["counts"] == [60, 40, 20]
+    assert "b2c" not in json.loads((out / "1_0" / "meta.json").read_text())

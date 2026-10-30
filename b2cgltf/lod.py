@@ -187,3 +187,121 @@ def chain(doc: Document, base: int | None = None, *, log=print) -> list[tuple[in
         log(f"b2cgltf.lod: node {base}'s LOD chain is not used: " + "; ".join(problems))
         return out
     return out + [(r["node"], r["count"], r["maxScreenHeightPx"]) for r in _record(doc, base)["levels"]]
+
+
+def _prim_accessors(prim: dict) -> set[int]:
+    """The accessors a splat primitive refers to: attributes, indices and b2crig's binding (SPEC 5.3)."""
+    out = set(prim.get("attributes", {}).values())
+    if "indices" in prim:
+        out.add(prim["indices"])
+    bind = (prim.get("extensions") or {}).get("B2CRIG_splat_cage") or {}
+    out |= {v for k, v in bind.items() if k != "version" and isinstance(v, int)}
+    return out
+
+
+def strip_lods(src, dst) -> dict:
+    """SPEC 4.7 / 10.3: a copy of the subject file without its LOD chains: the level nodes, their meshes and bytes,
+    `MSFT_lod`, the level records and `MSFT_screencoverage`. The current splat, its binding and the rig are unchanged,
+    so this is no supersede (R7) but a strip (R8): the copy keeps the `b2c_id` (its clips still fit) and gets a history
+    entry and `b2c_stripped`. Returns what went."""
+    import copy
+    import datetime as _dt
+    from . import __version__, glb
+    doc = Document.load(src)
+    js, bin_ = copy.deepcopy(doc.json), doc.bin
+    nodes = js["nodes"]
+    bases = [i for i, nd in enumerate(nodes) if MSFT in (nd.get("extensions") or {})]
+    if not bases:
+        raise ValueError(f"{src}: no LOD chain to strip")
+    drop = sorted({i for b in bases for i in nodes[b]["extensions"][MSFT].get("ids", [])})
+    for b in bases:
+        ext = nodes[b]["extensions"]
+        for k in (MSFT, *RECORD.values()):
+            ext.pop(k, None)
+        if not ext:
+            nodes[b].pop("extensions")
+        ex = nodes[b].get("extras") or {}
+        ex.pop("MSFT_screencoverage", None)
+        if "extras" in nodes[b] and not ex:
+            nodes[b].pop("extras")
+    dropped = set(drop)
+    keep = [i for i in range(len(nodes)) if i not in dropped]
+    for i in keep:
+        if dropped & set(nodes[i].get("children", [])) or nodes[i].get("extras", {}).get("supersedes") in dropped:
+            raise ValueError(f"{src}: node {i} refers to a level node; levels must be in no scene (SPEC 4.7)")
+    # meshes and accessors only the levels use (a b2crig level may reference b2crunner's level: both go)
+    kept_meshes = {nodes[i]["mesh"] for i in keep if "mesh" in nodes[i]}
+    gone_meshes = {nodes[i]["mesh"] for i in drop if "mesh" in nodes[i]} - kept_meshes
+    kept_acc = {a for m in kept_meshes for p in js["meshes"][m]["primitives"] for a in _prim_accessors(p)}
+    gone_acc = {a for m in gone_meshes for p in js["meshes"][m]["primitives"] for a in _prim_accessors(p)} - kept_acc
+    # accessor indices are referenced from many extensions (cameras, MHR, ...): a dropped accessor stays as an
+    # empty placeholder so no index moves; only its bytes go
+    for a in gone_acc:
+        js["accessors"][a] = {"componentType": 5126, "type": "SCALAR", "count": 1, "name": "b2c_stripped"}
+    used_views = {a["bufferView"] for a in js["accessors"] if "bufferView" in a}
+    for a in js["accessors"]:
+        for part in ("indices", "values"):
+            if "bufferView" in a.get("sparse", {}).get(part, {}):
+                used_views.add(a["sparse"][part]["bufferView"])
+    used_views |= {im["bufferView"] for im in js.get("images", []) if "bufferView" in im}
+    vmap, views, blob = {}, [], bytearray()
+    for i, v in enumerate(js.get("bufferViews", [])):
+        if i not in used_views:
+            continue
+        blob.extend(b"\0" * (-len(blob) % 8))
+        o = v.get("byteOffset", 0)
+        views.append(dict(v, byteOffset=len(blob)))
+        blob.extend(bin_[o:o + v["byteLength"]])
+        vmap[i] = len(views) - 1
+    blob.extend(b"\0" * (-len(blob) % 4))
+    for a in js["accessors"]:
+        if "bufferView" in a:
+            a["bufferView"] = vmap[a["bufferView"]]
+        for part in ("indices", "values"):
+            if "bufferView" in a.get("sparse", {}).get(part, {}):
+                a["sparse"][part]["bufferView"] = vmap[a["sparse"][part]["bufferView"]]
+    for im in js.get("images", []):
+        if "bufferView" in im:
+            im["bufferView"] = vmap[im["bufferView"]]
+    js["bufferViews"] = views
+    js["buffers"] = [{"byteLength": len(blob)}]
+    # nodes and meshes re-indexed
+    nmap = {old: new for new, old in enumerate(keep)}
+    mkeep = [m for m in range(len(js.get("meshes", []))) if m not in gone_meshes]
+    mmap = {old: new for new, old in enumerate(mkeep)}
+    names = [nodes[i].get("name", str(i)) for i in drop]
+    js["nodes"] = [nodes[i] for i in keep]
+    js["meshes"] = [js["meshes"][m] for m in mkeep]
+    for nd in js["nodes"]:
+        if "children" in nd:
+            nd["children"] = [nmap[c] for c in nd["children"]]
+        if "mesh" in nd:
+            nd["mesh"] = mmap[nd["mesh"]]
+        if "supersedes" in nd.get("extras", {}):
+            nd["extras"]["supersedes"] = nmap[nd["extras"]["supersedes"]]
+    for sc in js.get("scenes", []):
+        sc["nodes"] = [nmap[n] for n in sc.get("nodes", [])]
+    for sk in js.get("skins", []):
+        sk["joints"] = [nmap[j] for j in sk["joints"]]
+        if "skeleton" in sk:
+            sk["skeleton"] = nmap[sk["skeleton"]]
+    for an in js.get("animations", []):
+        for ch in an.get("channels", []):
+            if "node" in ch.get("target", {}):
+                ch["target"]["node"] = nmap[ch["target"]["node"]]
+    rig = (js.get("extensions") or {}).get("B2CRIG_rig")
+    if rig:
+        for k in ("cageNode", "splatNode"):
+            if rig.get(k) is not None:
+                rig[k] = nmap[rig[k]]
+    left = {k for nd in js["nodes"] for k in (nd.get("extensions") or {})}
+    js["extensionsUsed"] = [e for e in js.get("extensionsUsed", []) if e not in (MSFT, *RECORD.values()) or e in left]
+    ex = js["asset"].setdefault("extras", {})
+    removed = {"what": "LOD levels (SPEC 4.7)", "nodes": names}
+    ex["b2c_stripped"] = list(ex.get("b2c_stripped", [])) + [removed]
+    ex.setdefault("b2c_history", []).append({
+        "tool": "b2cgltf.lod.strip_lods", "version": __version__, "commit": "",
+        "time": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"), "added": [],
+        "removed": names})
+    glb.write(dst, js, blob)
+    return {"levels": names, "bytes_before": len(bin_), "bytes_after": len(blob)}

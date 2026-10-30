@@ -252,10 +252,11 @@ def cage(doc: Document) -> Cage:
     return Cage(np.concatenate(V), np.concatenate(F), I, Wt, rig["layers"], rig["render"])
 
 
-def binding(doc: Document) -> Binding:
+def binding(doc: Document, node: int | None = None) -> Binding:
+    """The rigged splat's binding, or that of LOD level `node` (SPEC 5.3)."""
     js = doc.json
-    rig = doc.extension(RIG)
-    prim = js["meshes"][js["nodes"][rig["splatNode"]]["mesh"]]["primitives"][0]
+    node = doc.extension(RIG)["splatNode"] if node is None else node
+    prim = js["meshes"][js["nodes"][node]["mesh"]]["primitives"][0]
     e = prim["extensions"][BIND]
     f = doc.accessor(e["face"]).astype(np.int64)
     f[f == UNBOUND] = -1

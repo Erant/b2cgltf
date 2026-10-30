@@ -1,12 +1,15 @@
 """The web forms of a rigged subject and its clips (SPEC 10): smaller files for publishing, played by b2cviewer.
 
-    subject(scene.glb, out.sog)                  # SOG v2 splat + binding textures + rig.glb (runs splat-transform)
+    subject(scene.glb, out.sog[, level=i])       # SOG v2 splat + binding textures + rig.glb (runs splat-transform)
+    subject_lods(scene.glb, out_dir)             # the LOD chain as a streamed SOG: lod-meta.json + <level>_0/ (10.3)
     clip(name.clip.glb, out.clip.zip, step_mm)   # joint channels + the residual quantised, frame-delta coded, deflated
 
-    python -m b2cgltf.web subject SCENE.glb OUT.sog
+    python -m b2cgltf.web subject SCENE.glb OUT.sog [--level I]
+    python -m b2cgltf.web subject-lods SCENE.glb OUT_DIR
+    python -m b2cgltf.web strip-lods SCENE.glb OUT.glb     # b2cgltf.lod.strip_lods: the file without its levels
     python -m b2cgltf.web clip NAME.clip.glb OUT.clip.zip [--step-mm 0.05]
 
-Both are lossy and derived: the glTF files stay the source. The subject needs Pillow, SciPy and splat-transform
+All are lossy and derived: the glTF files stay the source. The subject needs Pillow, SciPy and splat-transform
 (`pip install b2cgltf[web]`; splat-transform on PATH, or SPLAT_TRANSFORM naming it); the clip needs numpy only.
 """
 from __future__ import annotations
@@ -15,6 +18,7 @@ import argparse
 import copy
 import io
 import json
+import shutil
 import subprocess
 import tempfile
 import zipfile
@@ -160,39 +164,34 @@ def _sog_order(meta: dict, files: dict[str, bytes], pos: np.ndarray) -> np.ndarr
     return order
 
 
-def subject(src: str | Path, dst: str | Path, *, exe: str | None = None) -> dict:
-    """SPEC 10.1: the web form of a rigged subject file."""
-    doc = Document.load(src)
-    if doc.extension(R.RIG) is None:
-        raise ValueError(f"{src}: not rigged (no B2CRIG_rig); a plain splat needs no b2c web form, use splat-transform")
-    rig = doc.extension(R.RIG)
-    if read.current_splat(doc) != rig["splatNode"]:
-        raise ValueError(f"{src}: the current splat is not b2crig's rigged splat")
-    s = read.splat(doc)
-    f = read.to_trainer_ply_fields(s)
-    f.pop("seg_label", None); f.pop("seg_conf", None)
-    n = len(f["x"])
-    b = R.binding(doc)
+def _st_fields(doc: Document, node: int) -> dict:
+    """A splat's trainer-PLY fields as splat-transform gets them: without seg_* (and any ev_*), so every LOD level has
+    the same columns (splat-transform: "stackLods: available-layer mismatch" otherwise)."""
+    f = read.to_trainer_ply_fields(read.splat(doc, node))
+    return {k: v for k, v in f.items() if not k.startswith(("seg_", "ev_"))}
+
+
+def _run_st(args: list[str], out: Path, exe: str | None) -> None:
+    run = subprocess.run([exe or splat_transform(), "-w", *args], capture_output=True, text=True)
+    if run.returncode != 0 or not out.exists():
+        raise RuntimeError(f"splat-transform failed:\n{run.stdout[-2000:]}\n{run.stderr[-2000:]}")
+
+
+def _binding(doc: Document, node: int, meta: dict, files: dict[str, bytes], rig_path: str, src) -> tuple[dict, dict, list]:
+    """Splat `node`'s binding as textures in its SOG's order (`meta`, `files`: the SOG as written): (the b2c block
+    for meta.json, {texture name: bytes}, notes)."""
+    n = meta["count"]
+    s, b = read.splat(doc, node), R.binding(doc, node)
+    if len(s["pos"]) != n:
+        raise ValueError(f"node {node}: the SOG holds {n} splats, the splat {len(s['pos'])}")
     notes = []
     if b.alt is not None or any(k.startswith("alt") for k in s["primitive"]["extensions"][R.BIND]):
         notes.append("the dual binding (alt*) is not carried: b2cviewer does not use it")
     nf = len(R.cage(doc).faces)
     if nf >= FACE_LIMIT:
         raise ValueError(f"{src}: the cage has {nf} faces; bind_face.webp holds at most {FACE_LIMIT - 1}")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        ply = Path(tmp) / "splat.ply"
-        write_ply(ply, f)
-        sog = Path(tmp) / "splat.sog"
-        run = subprocess.run([exe or splat_transform(), "-w", str(ply), str(sog)], capture_output=True, text=True)
-        if run.returncode != 0 or not sog.exists():
-            raise RuntimeError(f"splat-transform failed:\n{run.stdout[-2000:]}\n{run.stderr[-2000:]}")
-        with zipfile.ZipFile(sog) as z:
-            files = {i.filename: z.read(i) for i in z.infolist()}
-    meta = json.loads(files["meta.json"])
     _, W, H = _texels(files[meta["means"]["files"][0]], n)
     order = _sog_order(meta, files, s["pos"].astype(np.float64))
-
     face = b.face[order]
     bary = np.asarray(b.barycentric, np.float64)[order]
     off = np.asarray(b.offset, np.float64)[order]
@@ -201,32 +200,151 @@ def subject(src: str | Path, dst: str | Path, *, exe: str | None = None) -> dict
     olo, ohi = off.min(0), off.max(0)
     o16 = np.round((off - olo) / np.maximum(ohi - olo, 1e-12) * 65535).astype(np.uint32)
     ones = np.full(n, 255, np.uint32)
-    extra = {
+    tex = {
         "bind_face.webp": _webp(np.stack([f16 & 255, f16 >> 8, b8[:, 0], b8[:, 1]], 1), W, H),
         "bind_off_l.webp": _webp(np.stack([o16[:, 0] & 255, o16[:, 1] & 255, o16[:, 2] & 255, ones], 1), W, H),
         "bind_off_u.webp": _webp(np.stack([o16[:, 0] >> 8, o16[:, 1] >> 8, o16[:, 2] >> 8, ones], 1), W, H),
-        "rig.glb": rig_glb(doc),
     }
-    meta["b2c"] = {
+    block = {
         "version": WEB_VERSION,
-        "rig": "rig.glb",
+        "rig": rig_path,
         "binding": {"posing": POSING,
                     "face": {"file": "bind_face.webp"},
                     "offset": {"mins": olo.tolist(), "maxs": ohi.tolist(), "files": ["bind_off_l.webp", "bind_off_u.webp"]}},
     }
+    return block, tex, notes
+
+
+def _rigged_chain(doc: Document, src) -> list[tuple[int, int, float | None]]:
+    rig = doc.extension(R.RIG)
+    if rig is not None and read.current_splat(doc) != rig["splatNode"]:
+        raise ValueError(f"{src}: the current splat is not b2crig's rigged splat")
+    return read.lods(doc)
+
+
+def subject(src: str | Path, dst: str | Path, *, level: int = 0, exe: str | None = None) -> dict:
+    """SPEC 10.1: the web form of a rigged subject file, one .sog. `level`: which member of the current splat's LOD
+    chain (SPEC 4.7, read.lods) is the splat, with its own binding; 0 = the rigged splat itself."""
+    doc = Document.load(src)
+    if doc.extension(R.RIG) is None:
+        raise ValueError(f"{src}: not rigged (no B2CRIG_rig); a plain splat needs no b2c web form, use splat-transform")
+    chain = _rigged_chain(doc, src)
+    if not 0 <= level < len(chain):
+        raise ValueError(f"{src}: no level {level} (the chain has {len(chain)} members)")
+    node, _, height = chain[level]
+    with tempfile.TemporaryDirectory() as tmp:
+        ply, sog = Path(tmp) / "splat.ply", Path(tmp) / "splat.sog"
+        write_ply(ply, _st_fields(doc, node))
+        _run_st([str(ply), str(sog)], sog, exe)
+        with zipfile.ZipFile(sog) as z:
+            files = {i.filename: z.read(i) for i in z.infolist()}
+    meta = json.loads(files["meta.json"])
+    block, tex, notes = _binding(doc, node, meta, files, "rig.glb", src)
+    if level:
+        block["level"] = {"index": level, "maxScreenHeightPx": height}
+    meta["b2c"] = block
+    tex["rig.glb"] = rig_glb(doc)
     entries = [("meta.json", json.dumps(meta, separators=(",", ":")).encode(), True)]
     entries += [(k, v, False) for k, v in files.items() if k != "meta.json"]
-    entries += [(k, v, k == "rig.glb") for k, v in extra.items()]
+    entries += [(k, v, k == "rig.glb") for k, v in tex.items()]
     _write_zip(Path(dst), entries)
-    return {"splats": n, "bytes": Path(dst).stat().st_size, "notes": notes}
+    return {"splats": meta["count"], "bytes": Path(dst).stat().st_size, "notes": notes}
+
+
+def _one_file_per_level(lm: dict, counts: list[int]) -> bool:
+    """lod-meta.json keeps level i whole in file `i_0/`: the tree's nodes (spatial cells, splat-transform splits once
+    the levels together pass chunkGaussians) only index ranges of it, which tile it exactly."""
+    if lm.get("filenames") != [f"{i}_0/meta.json" for i in range(len(counts))]:
+        return False
+    spans = {i: [] for i in range(len(counts))}
+    stack = [lm.get("tree", {})]
+    while stack:
+        nd = stack.pop()
+        stack += nd.get("children", [])
+        for k, r in nd.get("lods", {}).items():
+            if int(k) not in spans or r["file"] != int(k):
+                return False
+            spans[int(k)].append((r["offset"], r["count"]))
+    for i, c in enumerate(counts):
+        at = 0
+        for off, n in sorted(spans[i]):
+            if off != at:
+                return False
+            at += n
+        if at != c:
+            return False
+    return True
+
+
+def subject_lods(src: str | Path, out_dir: str | Path, *, exe: str | None = None) -> dict:
+    """SPEC 10.3: the current splat's LOD chain (read.lods) as one PlayCanvas streamed SOG: out_dir/lod-meta.json and
+    a `<level>_0/` SOG folder per level (0 = the base), written by splat-transform from one `-l N` tagged input per
+    level. A rigged subject also gets each level's binding textures in that level's SOG order (its meta.json's `b2c`
+    block, as in `subject`) and one rig.glb for all. lod-meta.json gets a `b2c` block with each level's count and
+    maxScreenHeightPx, which a player picks the level by (lod-meta.json holds no screen heights)."""
+    doc = Document.load(src)
+    rigged = doc.extension(R.RIG) is not None
+    chain = _rigged_chain(doc, src)
+    out = Path(out_dir)
+    if out.exists() and any(out.iterdir()) and not (out / "lod-meta.json").exists():
+        raise ValueError(f"{out}: not empty and not a streamed SOG")
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        args = []
+        for i, (node, _, _) in enumerate(chain):
+            ply = Path(tmp) / f"l{i}.ply"
+            write_ply(ply, _st_fields(doc, node))
+            args += [str(ply), "-l", str(i)]
+        stage = Path(tmp) / "out"
+        _run_st([*args, str(stage / "lod-meta.json")], stage / "lod-meta.json", exe)
+        lm = json.loads((stage / "lod-meta.json").read_text())
+        if not _one_file_per_level(lm, [c for _, c, _ in chain]):
+            raise NotImplementedError("splat-transform split a level over several files (more than "
+                                      f"{lm.get('asset', {}).get('chunkGaussians')} splats in it, or a larger extent): "
+                                      "b2c.binding is written for one file per level")
+        levels, notes = [], []
+        for i, (node, count, height) in enumerate(chain):
+            d = stage / f"{i}_0"
+            files = {f.name: f.read_bytes() for f in d.iterdir()}
+            meta = json.loads(files["meta.json"])
+            if rigged:
+                block, tex, nt = _binding(doc, node, meta, files, "../rig.glb", src)
+                notes += [n for n in nt if n not in notes]
+                block["level"] = {"index": i, "maxScreenHeightPx": height}
+                meta["b2c"] = block
+                for k, v in tex.items():
+                    (d / k).write_bytes(v)
+                (d / "meta.json").write_text(json.dumps(meta, separators=(",", ":")))
+            levels.append({"count": count, "maxScreenHeightPx": height})
+        lm["b2c"] = {"version": WEB_VERSION, "levels": levels, **({"rig": "rig.glb"} if rigged else {})}
+        (stage / "lod-meta.json").write_text(json.dumps(lm, separators=(",", ":")))
+        if rigged:
+            (stage / "rig.glb").write_bytes(rig_glb(doc))
+        # replace a previous output only once this one is complete
+        for old in [*out.glob("*_*/"), out / "lod-meta.json", out / "rig.glb"]:
+            if old.is_dir():
+                shutil.rmtree(old)
+            elif old.exists():
+                old.unlink()
+        for f in stage.iterdir():
+            shutil.move(str(f), out / f.name)
+    size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
+    return {"levels": levels, "bytes": size, "rigged": rigged, "notes": notes}
 
 
 def read_subject(path: str | Path) -> dict:
-    """A web subject read back (for checks): the SOG centres, the binding in SOG order and the rig document."""
-    with zipfile.ZipFile(path) as z:
-        files = {i.filename: z.read(i) for i in z.infolist()}
+    """A web subject read back (for checks): the SOG centres, the binding in SOG order and the rig document. `path`:
+    a .sog, or one level folder (`<level>_0/`) of a streamed SOG (subject_lods)."""
+    path = Path(path)
+    if path.is_dir():
+        files = {f.name: f.read_bytes() for f in path.iterdir() if f.is_file()}
+    else:
+        with zipfile.ZipFile(path) as z:
+            files = {i.filename: z.read(i) for i in z.infolist()}
     meta = json.loads(files["meta.json"])
     n, B = meta["count"], meta["b2c"]
+    if B["rig"] not in files:   # a streamed SOG's level: the shared rig.glb beside the level folders
+        files[B["rig"]] = (path / B["rig"]).read_bytes()
     lo, _, _ = _texels(files[meta["means"]["files"][0]], n)
     hi, _, _ = _texels(files[meta["means"]["files"][1]], n)
     mn, mx = np.array(meta["means"]["mins"]), np.array(meta["means"]["maxs"])
@@ -305,13 +423,28 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("subject", help="a rigged subject .glb -> its web form (.sog)")
     a.add_argument("src", type=Path); a.add_argument("dst", type=Path)
+    a.add_argument("--level", type=int, default=0, help="LOD level of the current splat (0 = the rigged splat)")
+    sl = sub.add_parser("subject-lods", help="a subject .glb -> its LOD chain as a streamed SOG (lod-meta.json)")
+    sl.add_argument("src", type=Path); sl.add_argument("dst", type=Path)
+    st = sub.add_parser("strip-lods", help="a subject .glb -> a copy without its LOD levels")
+    st.add_argument("src", type=Path); st.add_argument("dst", type=Path)
     c = sub.add_parser("clip", help="a .clip.glb -> its web form (.clip.zip)")
     c.add_argument("src", type=Path); c.add_argument("dst", type=Path)
     c.add_argument("--step-mm", type=float, default=DEFAULT_STEP_MM, help=f"residual quantisation step (default {DEFAULT_STEP_MM})")
     args = ap.parse_args(argv)
     if args.cmd == "subject":
-        info = subject(args.src, args.dst)
+        info = subject(args.src, args.dst, level=args.level)
         print(f"{args.dst}: {info['splats']} splats, {info['bytes'] / 1e6:.2f} MB")
+    elif args.cmd == "subject-lods":
+        info = subject_lods(args.src, args.dst)
+        print(f"{args.dst}: {len(info['levels'])} levels "
+              + ", ".join(f"{lv['count']}" + (f" <= {lv['maxScreenHeightPx']:g} px" if lv["maxScreenHeightPx"] else "")
+                          for lv in info["levels"]) + f", {info['bytes'] / 1e6:.2f} MB")
+    elif args.cmd == "strip-lods":
+        from .lod import strip_lods
+        info = strip_lods(args.src, args.dst)
+        print(f"{args.dst}: removed {', '.join(info['levels'])}; {info['bytes_before'] / 1e6:.1f} -> "
+              f"{info['bytes_after'] / 1e6:.1f} MB of data")
     else:
         info = clip(args.src, args.dst, args.step_mm)
         print(f"{args.dst}: {info['bytes'] / 1e6:.2f} MB, residual within {info['max_residual_error_m'] * 1000:.3f} mm"
