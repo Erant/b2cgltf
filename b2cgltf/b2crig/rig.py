@@ -113,62 +113,17 @@ def enhance(doc: Document, w: Writer, layers: list[Layer], binding: Binding, *, 
     cage_node = w.add_node({"name": "b2crig_cage", "mesh": cage_mesh, "skin": 0})
 
     # ---- rigged splat
-    n = len(binding.face)
     if retrained_splat is not None:
-        sat = S.attributes(w, retrained_splat)
-        sat = {k: v for k, v in sat.items() if not k.startswith("_SEG_")}   # b2crunner's names; b2crig keeps them below
-        f = S._fields(retrained_splat)
-        if "seg_label" in f:
-            sat["_B2CRIG_SEG_LABEL"] = w.add_accessor(np.asarray(f["seg_label"]).astype(np.uint8), "SCALAR", component=UNSIGNED_BYTE, target=ARRAY_BUFFER)
-            sat["_B2CRIG_SEG_CONF"] = w.add_accessor(np.asarray(f["seg_conf"], np.float32), "SCALAR", target=ARRAY_BUFFER)
+        sat = _retrained_attributes(w, retrained_splat)
         supersedes = doc.node_index("b2c_splat")
     else:
-        d = read.splat(doc, doc.node_index("b2c_splat"))
-        at = d["primitive"]["attributes"]
-        sat = S.splat_attribute_keys(at)   # R1a: b2crunner's accessors, referenced
-        if "_SEG_LABEL" in at:   # the labels the binding was made with, under b2crig's names (R1)
-            sat["_B2CRIG_SEG_LABEL"], sat["_B2CRIG_SEG_CONF"] = at["_SEG_LABEL"], at["_SEG_CONF"]
+        sat = _referenced_attributes(doc, doc.node_index("b2c_splat"))
         supersedes = None
-    cnt = doc.json["accessors"][sat["POSITION"]]["count"]
-    if cnt != n:
-        raise ValueError(f"the binding has {n} splats, the splat {cnt}")
-    # preview skin: the bound triangle's vertex weights blended by barycentrics, top 4
     Fall = np.concatenate([np.asarray(L.faces, np.int64) + m["vertexOffset"] for L, m in zip(layers, meta)])
     kmax = max(a.shape[1] for a in all_idx)
     CI = np.concatenate([np.pad(a, ((0, 0), (0, kmax - a.shape[1]))) for a in all_idx])
     CW = np.concatenate([np.pad(a, ((0, 0), (0, kmax - a.shape[1]))) for a in all_w])
-    face = np.asarray(binding.face, np.int64)
-    ok = face >= 0
-    tri = Fall[np.where(ok, face, 0)]
-    b = np.asarray(binding.barycentric, np.float64)
-    bw3 = np.stack([1 - b[:, 0] - b[:, 1], b[:, 0], b[:, 1]], 1)
-    dense = np.zeros((n, J))
-    rows = np.repeat(np.arange(n), kmax)
-    for c in range(3):
-        np.add.at(dense, (rows, CI[tri[:, c]].reshape(-1)), (bw3[:, c:c + 1] * CW[tri[:, c]]).reshape(-1))
-    top = np.argsort(-dense, 1)[:, :4]
-    tw = np.take_along_axis(dense, top, 1)
-    if top.shape[1] < 4:   # fewer than 4 joints in the skeleton
-        top = np.pad(top, ((0, 0), (0, 4 - top.shape[1]))); tw = np.pad(tw, ((0, 0), (0, 4 - tw.shape[1])))
-    tw[~ok] = [1, 0, 0, 0]; top[~ok] = 0
-    tw /= np.maximum(tw.sum(1, keepdims=True), 1e-12)
-    sat.update(_joint_sets(w, top, tw, J))
-    for k, v in (splat_extra or {}).items():
-        if not k.startswith("_B2CRIG_"):
-            raise RuleError(f"b2crig splat attribute {k} needs the _B2CRIG_ prefix")
-        sat[k] = w.add_accessor(np.asarray(v, np.float32), "SCALAR", target=ARRAY_BUFFER)
-    ext = {"version": 1, "posing": POSING,
-           "face": w.add_accessor(np.where(ok, face, UNBOUND).astype(np.uint32), "SCALAR", component=UNSIGNED_INT),
-           "barycentric": w.add_accessor(np.asarray(binding.barycentric, np.float32), "VEC2"),
-           "offset": w.add_accessor(np.asarray(binding.offset, np.float32), "VEC3")}
-    if binding.alt:
-        a = binding.alt
-        ext.update({"altSplat": w.add_accessor(np.asarray(a["altSplat"], np.uint32), "SCALAR", component=UNSIGNED_INT),
-                    "altFace": w.add_accessor(np.asarray(a["altFace"], np.uint32), "SCALAR", component=UNSIGNED_INT),
-                    "altBarycentric": w.add_accessor(np.asarray(a["altBarycentric"], np.float32), "VEC2"),
-                    "altOffset": w.add_accessor(np.asarray(a["altOffset"], np.float32), "VEC3"),
-                    "altWeight": w.add_accessor(np.asarray(a["altWeight"], np.float32), "SCALAR")})
-    splat_mesh = w.add_mesh({"name": "b2crig_splat", "primitives": [S.primitive(sat, {BIND: ext})]})
+    splat_mesh = _rigged_splat_mesh(w, "b2crig_splat", sat, binding, Fall, CI, CW, J, splat_extra)
     node = {"name": "b2crig_splat", "mesh": splat_mesh, "skin": 0}
     if supersedes is not None:
         node["extras"] = {"supersedes": supersedes}
@@ -186,6 +141,86 @@ def enhance(doc: Document, w: Writer, layers: list[Layer], binding: Binding, *, 
                               "latents": w.add_accessor(lat.reshape(-1), "SCALAR"), "latentSize": int(lat.shape[-1]),
                               **{k: v for k, v in app.items() if k not in ("params", "latents")}})
     return RigResult(scene, cage_node, splat_node, meta)
+
+
+def _retrained_attributes(w: Writer, fields) -> dict:
+    """A splat b2crig retrained, encoded (4.2), its labels under b2crig's names (R1)."""
+    sat = S.attributes(w, fields)
+    sat = {k: v for k, v in sat.items() if not k.startswith("_SEG_")}   # b2crunner's names; b2crig keeps them below
+    f = S._fields(fields)
+    if "seg_label" in f:
+        sat["_B2CRIG_SEG_LABEL"] = w.add_accessor(np.asarray(f["seg_label"]).astype(np.uint8), "SCALAR", component=UNSIGNED_BYTE, target=ARRAY_BUFFER)
+        sat["_B2CRIG_SEG_CONF"] = w.add_accessor(np.asarray(f["seg_conf"], np.float32), "SCALAR", target=ARRAY_BUFFER)
+    return sat
+
+
+def _referenced_attributes(doc: Document, node: int) -> dict:
+    """b2crunner's splat `node`, referenced (R1a), with its labels under b2crig's names."""
+    at = read.splat(doc, node)["primitive"]["attributes"]
+    sat = S.splat_attribute_keys(at)
+    if "_SEG_LABEL" in at:   # the labels the binding was made with, under b2crig's names (R1)
+        sat["_B2CRIG_SEG_LABEL"], sat["_B2CRIG_SEG_CONF"] = at["_SEG_LABEL"], at["_SEG_CONF"]
+    return sat
+
+
+def _rigged_splat_mesh(w: Writer, name: str, sat: dict, binding: Binding, Fall: np.ndarray, CI: np.ndarray,
+                       CW: np.ndarray, J: int, splat_extra: dict | None) -> int:
+    """The rigged splat's mesh (5.3): `sat` plus the preview skin, b2crig's per-splat state and B2CRIG_splat_cage.
+    Fall [nf, 3] the cage's global faces; CI / CW [nv, k] its per-vertex joints and weights."""
+    n = len(binding.face)
+    cnt = w.doc.json["accessors"][sat["POSITION"]]["count"]
+    if cnt != n:
+        raise ValueError(f"the binding has {n} splats, the splat {cnt}")
+    # preview skin: the bound triangle's vertex weights blended by barycentrics, top 4
+    kmax = CI.shape[1]
+    face = np.asarray(binding.face, np.int64)
+    ok = face >= 0
+    tri = Fall[np.where(ok, face, 0)]
+    b = np.asarray(binding.barycentric, np.float64)
+    bw3 = np.stack([1 - b[:, 0] - b[:, 1], b[:, 0], b[:, 1]], 1)
+    dense = np.zeros((n, J))
+    rows = np.repeat(np.arange(n), kmax)
+    for c in range(3):
+        np.add.at(dense, (rows, CI[tri[:, c]].reshape(-1)), (bw3[:, c:c + 1] * CW[tri[:, c]]).reshape(-1))
+    top = np.argsort(-dense, 1)[:, :4]
+    tw = np.take_along_axis(dense, top, 1)
+    if top.shape[1] < 4:   # fewer than 4 joints in the skeleton
+        top = np.pad(top, ((0, 0), (0, 4 - top.shape[1]))); tw = np.pad(tw, ((0, 0), (0, 4 - tw.shape[1])))
+    tw[~ok] = [1, 0, 0, 0]; top[~ok] = 0
+    tw /= np.maximum(tw.sum(1, keepdims=True), 1e-12)
+    sat = dict(sat)
+    sat.update(_joint_sets(w, top, tw, J))
+    for k, v in (splat_extra or {}).items():
+        if not k.startswith("_B2CRIG_"):
+            raise RuleError(f"b2crig splat attribute {k} needs the _B2CRIG_ prefix")
+        sat[k] = w.add_accessor(np.asarray(v, np.float32), "SCALAR", target=ARRAY_BUFFER)
+    ext = {"version": 1, "posing": POSING,
+           "face": w.add_accessor(np.where(ok, face, UNBOUND).astype(np.uint32), "SCALAR", component=UNSIGNED_INT),
+           "barycentric": w.add_accessor(np.asarray(binding.barycentric, np.float32), "VEC2"),
+           "offset": w.add_accessor(np.asarray(binding.offset, np.float32), "VEC3")}
+    if binding.alt:
+        a = binding.alt
+        ext.update({"altSplat": w.add_accessor(np.asarray(a["altSplat"], np.uint32), "SCALAR", component=UNSIGNED_INT),
+                    "altFace": w.add_accessor(np.asarray(a["altFace"], np.uint32), "SCALAR", component=UNSIGNED_INT),
+                    "altBarycentric": w.add_accessor(np.asarray(a["altBarycentric"], np.float32), "VEC2"),
+                    "altOffset": w.add_accessor(np.asarray(a["altOffset"], np.float32), "VEC3"),
+                    "altWeight": w.add_accessor(np.asarray(a["altWeight"], np.float32), "SCALAR")})
+    return w.add_mesh({"name": name, "primitives": [S.primitive(sat, {BIND: ext})]})
+
+
+def add_level(doc: Document, w: Writer, binding: Binding, *, name: str, splat_fields=None, reuse_node: int | None = None,
+              splat_extra: dict | None = None) -> int:
+    """A b2crig LOD level (SPEC 5.3) of a rigged subject: a skinned splat node in no scene, bound to the file's cage
+    like b2crig_splat. `splat_fields`: the level b2crig made (trainer-PLY fields); or `reuse_node`: a b2crunner level
+    node, referenced (R1a, the no-retrain case). Chain it with b2cgltf.lod.add_lods."""
+    if w.owner != "b2crig":
+        raise RuleError("the rig is b2crig's")
+    if (splat_fields is None) == (reuse_node is None):
+        raise ValueError("add_level: give splat_fields or reuse_node")
+    c = cage(doc)
+    sat = _retrained_attributes(w, splat_fields) if splat_fields is not None else _referenced_attributes(doc, reuse_node)
+    mesh = _rigged_splat_mesh(w, name, sat, binding, c.faces, c.joints, c.weights, len(read.skeleton(doc).joints), splat_extra)
+    return w.add_node({"name": name, "mesh": mesh, "skin": 0})
 
 
 # ---------------------------------------------------------------- reading the rig

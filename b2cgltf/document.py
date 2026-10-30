@@ -35,7 +35,8 @@ OWNERS = {
 }
 # Extension versions this package reads and writes (R6). A reader refuses others.
 VERSIONS = {"B2C_mhr": 1, "B2C_orbit": 1, "B2CRIG_rig": 1, "B2CRIG_splat_cage": 1, "B2CRIG_cage_app": 1,
-            "B2CRIG_clip": 1, "B2CRIG_cage_residual": 1, "B2CRIG_open_gate": 1, "B2CRIG_motion": 1}
+            "B2CRIG_clip": 1, "B2CRIG_cage_residual": 1, "B2CRIG_open_gate": 1, "B2CRIG_motion": 1, "B2C_lod": 1,
+            "B2CRIG_lod": 1}
 ARRAYS = ("accessors", "animations", "bufferViews", "cameras", "images", "materials", "meshes", "nodes", "samplers",
           "scenes", "skins", "textures")
 
@@ -173,6 +174,7 @@ class Writer:
         self.entry = {"tool": tool, "version": version, "commit": commit, "added": []}
         self.snap = copy.deepcopy(doc.json)
         self.joints: set[int] = set()
+        self.extended: dict[int, dict[str, set]] = {}   # node -> {"extensions"|"extras": keys added by extend_node}
         self.bin0 = len(doc.bin)
         self.bin_prefix = bytes(doc.bin)
 
@@ -304,6 +306,25 @@ class Writer:
         self._name_ok(cam, "camera")
         return self._append("cameras", cam)
 
+    def extend_node(self, i: int, *, extensions: dict | None = None, extras: dict | None = None) -> None:
+        """Add extension / extras keys to one of this owner's own nodes (SPEC R2b: e.g. a LOD chain on a splat node
+        written earlier). Only new keys: nothing already on the node is changed or removed."""
+        node = self.doc.json["nodes"][i]
+        if owner_of_name(node.get("name")) != self.owner:
+            raise RuleError(f"nodes/{i} {node.get('name')!r} is not {self.owner}'s (R1)")
+        for field, add in (("extensions", extensions), ("extras", extras)):
+            if not add:
+                continue
+            have = node.get(field) or {}
+            clash = sorted(set(add) & set(have))
+            if clash:
+                raise RuleError(f"nodes/{i} already has {field} {clash}; keys are only added, never replaced (R2b)")
+            if field == "extensions":
+                self._exts_ok({"extensions": add})
+            node.setdefault(field, {}).update(add)
+            self.extended.setdefault(i, {}).setdefault(field, set()).update(add)
+        self.entry["added"].append(f"nodes/{i}/" + ",".join(sorted(set(extensions or {}) | set(extras or {}))))
+
     def set_extension(self, key: str, value: dict) -> None:
         """A document-level extension (e.g. B2C_orbit, B2CRIG_rig). An owner may replace its own."""
         self._ext_ok(key)
@@ -331,7 +352,15 @@ class Writer:
             if len(new) < len(old):
                 raise RuleError(f"{key}: objects were removed (R2)")
             for i, o in enumerate(old):
-                if new[i] != o:
+                n = new[i]
+                if key == "nodes" and i in self.extended:   # keys extend_node added are the only allowed difference
+                    n = copy.deepcopy(n)
+                    for field, keys in self.extended[i].items():
+                        for k in keys:
+                            n.get(field, {}).pop(k, None)
+                        if field in n and not n[field] and field not in o:
+                            del n[field]
+                if n != o:
                     raise RuleError(f"{key}/{i} was changed; writers only append (R1, R2)")
         if self.doc.bin[:self.bin0] != self.bin_prefix:
             raise RuleError("buffer 0's existing bytes changed (R3)")
@@ -376,6 +405,7 @@ class Writer:
         self.doc.path = path
         # the next save of this writer starts from here
         self.snap, self.bin0, self.bin_prefix = copy.deepcopy(js), len(self.doc.bin), bytes(self.doc.bin)
+        self.extended = {}
         self.entry = dict(self.entry, added=[])
         return path
 

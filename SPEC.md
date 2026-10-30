@@ -1,6 +1,7 @@
 # b2c glTF: the subject file format shared by b2crunner and b2crig
 
-Version 1.0 (2026-09-29). Agreed between b2crunner and b2crig. Supersedes b2crunner's
+Version 1.1 (2026-10-30; 1.0 2026-09-29). Agreed between b2crunner and b2crig. 1.1 adds splat LOD levels
+(4.7). Files without levels are unchanged. Supersedes b2crunner's
 `docs/ply-header-records.md` (PLY header records) and `docs/tools.md` (`mhr.npz`) as the hand-off contract.
 
 A subject is **one glTF 2.0 binary file** (`.glb`). b2crunner creates it with the splat, the body and the capture
@@ -52,6 +53,8 @@ training dataset (`colmap/`) and regenerable caches (`seen.npy`) are not in any 
 - **R2 Append-only indices.** A writer only appends to `nodes`, `meshes`, `accessors`, `bufferViews`, `images`,
   `skins`, `scenes` and the other arrays. Every existing index stays valid.
   - **R2a** Accessors referenced only from an extension are legal.
+  - **R2b** An owner may add extension and `extras` keys to one of its own nodes written earlier (e.g. a LOD chain,
+    4.7). It only adds keys: nothing already on the node changes or goes.
 - **R3 One buffer.** The binary data is buffer 0, the GLB's BIN chunk. There are no external `.bin` files. An
   enhancing writer appends its bytes to buffer 0 and rewrites the file. The existing bytes stay identical.
 - **R4 Nothing required.** No `B2C_*` / `B2CRIG_*` extension goes in `extensionsRequired`, only in
@@ -64,6 +67,8 @@ training dataset (`colmap/`) and regenerable caches (`seen.npy`) are not in any 
 - **R6 Versioned extensions.** See section 2.
 - **R7 Replace means supersede.** To replace something the other tool owns, add a new object with
   `"extras": {"supersedes": <node index>}`. The old object stays.
+  - **R7a** Superseding a splat node supersedes its LOD chain (4.7) with it. The replacement carries its own chain,
+    or none. The old chain stays in the file but is dead: a reader only follows the current splat's chain (7.1).
 - **R8 Stripping makes a derived file.** Removing anything re-indexes the file. The result is a distribution file,
   with `asset.extras.b2c_stripped` listing what was removed, and the package refuses to enhance it. Only the
   unstripped subject file is enhanced.
@@ -85,6 +90,9 @@ scene 0 "b2c"
 
 - A skinned mesh node must be a scene root (glTF ignores its transform), so `b2c_body` is one.
 - The same root may appear in several scenes; b2crig's scene lists `b2c_skeleton` but not `b2c_world` (5.1).
+- **LOD levels** (optional, 4.7): `b2c_splat` may carry `MSFT_lod` and `B2C_lod`, chaining level nodes
+  `b2c_splat_lod1..n`. They are listed in no scene, have no transform and no skin, are in the b2crunner frame and are
+  placed with `b2c_splat`'s world matrix.
 - Joint nodes are named with MHR's joint names if the model provides them, otherwise `b2c_joint_NNN`. Their
   **order** is the contract: node order = MHR joint index.
 
@@ -210,6 +218,45 @@ referenced from `B2C_orbit.images`. `front` is the identity reference b2crig use
     COLMAP dataset (with names), and `extras.orbit_target` when the run's extras have it.
 - The trainer PLY stays b2crunner's and b2ctrain's internal format. The subject file is the delivery.
 
+### 4.7 Splat LOD levels: `MSFT_lod` + `B2C_lod` / `B2CRIG_lod`
+
+Lower-detail copies of a splat for subjects shown small. Readers that do not know about LODs see exactly the base
+splat.
+
+- **Chain.** The base splat node carries `MSFT_lod` `{"ids": [...]}`, the level nodes from most to least detailed.
+  `MSFT_lod` is in `extensionsUsed`, never `extensionsRequired` (R4). Level nodes are listed in no scene.
+- **Each level** is a full 4.2 splat primitive with the same SH degree, `kernel` and `colorSpace` as its base, the
+  base's `_SEG_LABEL` / `_SEG_CONF` if it has them (b2crig binds by them) and every b2crig per-splat attribute the
+  base has (5.3), and strictly fewer splats than the member before it.
+- **Level record**, the same schema under each owner's prefix (R1): `B2C_lod` on `b2c_splat`, `B2CRIG_lod` on
+  `b2crig_splat`:
+
+  ```json
+  {"version": 1, "levels": [
+    {"node": 7, "count": 100000, "maxScreenHeightPx": 960, "method": "b2ctrain lod-merge + ...", "source": "sha256:..."},
+    {"node": 8, "count": 50000,  "maxScreenHeightPx": 480, "method": "...", "source": "sha256:..."}]}
+  ```
+
+  - `node`: the level node; the list matches `MSFT_lod.ids` in order. `count`: its splat count.
+  - `maxScreenHeightPx`: **authoritative**. The largest on-screen subject height, in pixels, the level is meant for;
+    it strictly decreases along the chain. Players pick the level from it. Defaults 960 and 480 (judged by eye on
+    b2crunner's crew-* and b2crig's b24be4, 2026-10-30).
+  - `method`: free text, how the level was made.
+  - `source`: the splat the level was made from, as one SHA-256 over the concatenation of its `POSITION`,
+    `KHR_gaussian_splatting:ROTATION`, `:SCALE`, `:OPACITY`, then `:SH_DEGREE_d_COEF_n` for d = 0..degree, n = 0..2d:
+    the values as stored (normalised xyzw rotation, linear scale, sigmoid opacity), tightly packed little-endian
+    float32 in splat order, no stride padding, nothing else. Written `"sha256:"` + lowercase hex. A chain whose
+    `source` is not its base's is stale.
+- **`MSFT_screencoverage`** (optional, in the base node's `extras`): one value per chain member, derived from
+  `maxScreenHeightPx` for generic `MSFT_lod` readers (the package uses the base's front-on bounding box in a
+  1920×1080 viewport; the last value is 0). Never authoritative.
+- **How levels are made** (b2ctrain `lod-merge`, a port of splat-transform's merge): a group merges only splats with
+  the same `seg_label`, as given in the input; a merged splat's `seg_conf` is the group's minimum; b2crig per-splat
+  state is dropped, never averaged. With a cage, a merged splat's extent (3σ of its major axis) is at most K
+  (default 3) times the mean edge of the cage face it would bind to (`--cage-min-conf` as the binding uses it). The
+  count is hit exactly or the merge fails. b2crunner then fine-tunes unrigged levels against the full splat
+  (`lod-distill`); b2crig's are made as 5.3 says.
+
 ## 5. What b2crig writes into the subject file
 
 ### 5.1 Scene
@@ -259,6 +306,16 @@ scene 1 "b2crig"                (b2crig sets the document's default scene to it)
 - **`_B2CRIG_SEG_LABEL` / `_B2CRIG_SEG_CONF`**: the labels the binding was made with, so a consumer that binds again
   (b2ctrain) gets the same binding. They are b2crunner's `_SEG_*` accessors, referenced (R1a), or a retrained
   splat's own.
+- **LOD levels** (optional, 4.7) of the rigged splat, nodes `b2crig_splat_lod1..n`, chained with `MSFT_lod` and
+  `B2CRIG_lod` on `b2crig_splat`. Each is skinned like `b2crig_splat`, with its own `B2CRIG_splat_cage` binding,
+  preview skin, `_B2CRIG_SEG_*` and whatever per-splat state `b2crig_splat` has, and is listed in no scene.
+  - When b2crig retrained the splat, its levels are made from the rigged splat: `lod-merge` with the cage (K = 3),
+    then the pose containment fine-tune distilled against the rigged splat's renders with the rigged splat's own
+    alpha (`cage_train --distill --teacher --distill-alpha render --contain`).
+  - Without a retrain, b2crig's levels reference b2crunner's level accessors (R1a) and add only the binding; their
+    `source` equals b2crunner's because the base's accessors are the same.
+  - **Shared by every level:** the cage, skeleton, skin, `B2CRIG_rig`, `B2CRIG_cage_app` (per cage vertex) and every
+    clip with its residual (per cage vertex). One clip plays every level.
 - **Optional document extension `B2CRIG_cage_app`.** The pose-dependent appearance MLP (b2ctrain's `.app`):
   `{version, params, latents, latentSize, ...scalars}`. `params` and `latents` are flat float accessors; `latents`
   holds `latentSize` values per cage vertex.
@@ -311,6 +368,13 @@ These refinements (b2cgltf's first implementation, 2026-09-29) were made before 
 The current splat is the splat node that the default scene lists and that no other node supersedes. The package
 provides this as one function.
 
+### 7.1a The LOD chain
+
+The current splat's chain: the current splat followed by the nodes its `MSFT_lod.ids` lists, described by its
+`B2C_lod` or `B2CRIG_lod` (4.7). The package provides it as `read.lods(doc) -> [(node, count, maxScreenHeightPx)]`,
+base first with height `None`. It returns the base alone when there is no chain, or when the chain is stale or fails
+section 8's checks. A posed level is posed exactly as 7.2 poses the current splat, with the level's own binding.
+
 ### 7.2 A posed frame
 
 For a clip frame, in the b2crunner frame:
@@ -344,6 +408,11 @@ The sha256 must match. Readers that only need the bind-pose mesh, skeleton and w
   `MESH_PRIMITIVE_INVALID_ATTRIBUTE` on `KHR_gaussian_splatting:*` attributes, because validator 2.0.0-dev.3.10
   predates the extension. The allow-list is pinned to the validator version and removed once a release knows the
   extension. `UNSUPPORTED_EXTENSION` and `UNUSED_OBJECT` (R2a) are info level.
+- **LOD chains** (4.7, `lod.check`): every `MSFT_lod` id is a splat node in no scene, without a transform, and
+  without a skin if it is b2crunner's; the level record's nodes match `MSFT_lod.ids` in order and its counts match;
+  splat counts and `maxScreenHeightPx` strictly decrease; each level has its base's SH degree, `kernel`,
+  `colorSpace`, labels and b2crig per-splat attributes; `MSFT_screencoverage`, if present, has one non-increasing
+  value per chain member; a stale `source` is a warning. The writer (`lod.add_lods`) refuses a chain that fails.
 - **Round trip.** trainer PLY → subject file → PLY is bit-exact for positions, rotations and SH, and within
   float32 tolerance for scale and opacity.
 
@@ -355,6 +424,7 @@ The sha256 must match. Readers that only need the bind-pose mesh, skeleton and w
 | rig (b24be4: cage + binding + preview skin) | ~10 MB |
 | clip file: joint channels | ~1 MB per 360 frames |
 | clip file: residual (22.5k cage vertices) | ~49 MB per 360 frames |
+| LOD levels at SH degree 3: 100k + 50k | ~27 + ~15 MB (+45 % on a 370k subject) |
 
 For publishing, section 10's web forms bring b24be4 down to ~7 MB for the subject and ~3 MB per 100 clip frames.
 

@@ -194,3 +194,10 @@ def to_trainer_ply_fields(s: dict) -> dict:
     if "seg_label" in s:
         f["seg_label"] = s["seg_label"].astype(np.float32); f["seg_conf"] = s["seg_conf"]
     return {k: np.asarray(v, np.float32) for k, v in f.items()}
+
+
+def lods(doc: Document, node: int | None = None) -> list[tuple[int, int, float | None]]:
+    """SPEC 7.1: the current splat's LOD chain [(node, count, maxScreenHeightPx)], base first (height None); the base
+    alone when there is no chain or it is stale (b2cgltf.lod.chain)."""
+    from .lod import chain
+    return chain(doc, node)
